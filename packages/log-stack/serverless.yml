@@ -1,0 +1,16 @@
+service: dynamodb-log-store
+
+plugins:
+  - serverless-dynamodb-local
+
+provider:
+  name: aws
+  stage: ${opt:stage, 'dev'}
+
+custom:
+  dynamodb:
+    stages:
+      - dev
+
+resources:
+  - ${file(./create-tables.yml)}

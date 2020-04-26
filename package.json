@@ -1,0 +1,16 @@
+{
+  "name": "dynamodb-log-store-mono-repo",
+  "version": "0.0.1",
+  "description": "dynamodb-log-store-mono-repo",
+  "keywords": [
+    "eventsourcing",
+    "dynamodb",
+    "serverless",
+    "nodejs",
+    "eventlog",
+    "graphql"
+  ],
+  "author": "James Kyburz <james.kyburz@gmail.com>",
+  "license": "Apache-2.0",
+  "private": true
+}

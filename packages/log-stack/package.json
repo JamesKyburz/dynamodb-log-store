@@ -1,0 +1,30 @@
+{
+  "name": "dynamodb-log-store",
+  "version": "0.0.1",
+  "description": "log store using dynamodb",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src"
+  },
+  "keywords": [
+    "eventsourcing",
+    "dynamodb",
+    "serverless",
+    "nodejs",
+    "eventlog",
+    "graphql"
+  ],
+  "author": "James Kyburz <james.kyburz@gmail.com>",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "aws-sdk": "2.662.0",
+    "graphql": "15.0.0",
+    "graphql-tools": "5.0.0",
+    "server-base": "7.1.2",
+    "uuid": "7.0.3"
+  },
+  "devDependencies": {
+    "serverless-dynamodb-local": "0.2.39"
+  },
+  "private": true
+}
