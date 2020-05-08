@@ -6,6 +6,10 @@ module.exports = {
 }
 
 async function append (root, args, ast) {
+  if (args.jsonBody) {
+    args.payload = JSON.parse(args.jsonBody)
+    delete args.jsonBody
+  }
   return client.append(args)
 }
 

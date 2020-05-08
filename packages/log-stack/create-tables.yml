@@ -9,12 +9,12 @@ Resources:
           AttributeType: S
         - AttributeName: sk
           AttributeType: S
+        - AttributeName: logName
+          AttributeType: S
+        - AttributeName: sequence
+          AttributeType: S
         - AttributeName: stream
           AttributeType: S
-        - AttributeName: logSequence
-          AttributeType: N
-        - AttributeName: streamSequence
-          AttributeType: N
       KeySchema:
         - AttributeName: pk
           KeyType: HASH
@@ -25,7 +25,17 @@ Resources:
           KeySchema:
             - AttributeName: pk
               KeyType: HASH
-            - AttributeName: logSequence
+            - AttributeName: logName
+              KeyType: RANGE
+          Projection:
+            ProjectionType: 'INCLUDE'
+            NonKeyAttributes:
+              - sequence
+        - IndexName: logStream
+          KeySchema:
+            - AttributeName: pk
+              KeyType: HASH
+            - AttributeName: sequence
               KeyType: RANGE
           Projection:
             ProjectionType: 'INCLUDE'
@@ -35,15 +45,16 @@ Resources:
               - type
               - createdAt
       GlobalSecondaryIndexes:
-        - IndexName: stream
+        - IndexName: streamById
           KeySchema:
             - AttributeName: stream
               KeyType: HASH
-            - AttributeName: streamSequence
+            - AttributeName: sequence
               KeyType: RANGE
           Projection:
             ProjectionType: 'INCLUDE'
             NonKeyAttributes:
+              - id
               - payload
               - type
               - createdAt

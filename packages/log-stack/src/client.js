@@ -1,14 +1,12 @@
 const ApplicationError = require('./errors/application')
 const { v4: uuid } = require('uuid')
 const dynamodb = require('./dynamodb')
+const ulid = require('./ulid')
 
 module.exports = { logList, streamById, logStream, append }
 
-async function logList ({ limit = 1000, exclusiveStartKey, selection }) {
-  const projectionMap = getProjectionMap(selection, {
-    name: 'sk',
-    lastSequence: 'logSequence'
-  })
+async function logList ({ limit = 1000, cursor, selection }) {
+  const projectionMap = getProjectionMap(selection, { name: 'logName' })
 
   const {
     Items: items = [],
@@ -16,26 +14,41 @@ async function logList ({ limit = 1000, exclusiveStartKey, selection }) {
   } = await dynamodb.doc
     .query({
       TableName: 'logs',
+      IndexName: 'log',
       KeyConditionExpression: '#pk = :pk',
-      ExpressionAttributeNames: { '#pk': 'pk', ...projectionMap },
-      ExpressionAttributeValues: { ':pk': 'log-sequence' },
+      ExpressionAttributeNames: { ...projectionMap },
+      ExpressionAttributeValues: { ':pk': 'logname' },
       ProjectionExpression: projectionMap
         ? Object.keys(projectionMap).join(', ')
         : undefined,
-      ExclusiveStartKey: exclusiveStartKey,
+      ExclusiveStartKey: parseCursor(cursor),
       Limit: limit
     })
     .promise()
 
+  const result = {}
+
+  for (const { logName: name, sequence } of items) {
+    if (result[name]) {
+      if (sequence > result[name]) {
+        result[name] = sequence
+      }
+    } else {
+      result[name] = sequence
+    }
+  }
+
   const logs = []
 
-  for (const { sk: name, logSequence: lastSequence } of items) {
-    logs.push({ name, lastSequence })
+  for (const [name, sequence] of Object.entries(result)) {
+    logs.push({ name, sequence })
   }
 
   return {
     logs,
-    lastEvaluatedKey
+    cursor: stringifyCursor(
+      lastEvaluatedKey || lastEvaluatedItemKey(logs, ['pk', 'sk', 'logName'])
+    )
   }
 }
 
@@ -46,56 +59,37 @@ async function append ({ log, type, id, payload = {} }) {
   if (typeof payload !== 'object') {
     throw new ApplicationError('payload is not json')
   }
-
   const createdAt = Date.now()
-  const {
-    Attributes: { logSequence }
-  } = await dynamodb.doc
-    .update({
+  const sequence = await ulid()
+
+  await dynamodb.doc
+    .put({
       TableName: 'logs',
-      Key: { pk: 'log-sequence', sk: log },
-      UpdateExpression: 'ADD logSequence :incr',
-      ExpressionAttributeValues: { ':incr': 1 },
-      ReturnValues: 'UPDATED_NEW'
-    })
-    .promise()
-  const {
-    Attributes: { streamSequence }
-  } = await dynamodb.doc
-    .update({
-      TableName: 'logs',
-      Key: { pk: `stream-sequence#${log}#${id}`, sk: 'sequence' },
-      UpdateExpression: 'ADD streamSequence :incr',
-      ExpressionAttributeValues: { ':incr': 1 },
-      ReturnValues: 'UPDATED_NEW'
+      Item: {
+        pk: 'logname',
+        sk: `logname#${log}#${randomBetween(0, 25)}`,
+        logName: log,
+        sequence
+      }
     })
     .promise()
 
-  try {
-    await dynamodb.doc
-      .put({
-        TableName: 'logs',
-        Item: {
-          pk: `${log}#stream`,
-          sk: `stream#${id}#${streamSequence}`,
-          stream: `stream#${log}#${id}`,
-          logSequence,
-          streamSequence,
-          type,
-          createdAt,
-          id,
-          payload
-        },
-        ConditionExpression: 'attribute_not_exists(sk)'
-      })
-      .promise()
-  } catch (err) {
-    if (err.code === 'ConditionalCheckFailedException') {
-      throw new ApplicationError('key is writed-locked')
-    } else {
-      throw err
-    }
-  }
+  await dynamodb.doc
+    .put({
+      TableName: 'logs',
+      Item: {
+        pk: `event#${log}#stream`,
+        sk: `stream#${id}#${sequence}`,
+        stream: `stream#${id}`,
+        sequence,
+        type,
+        createdAt,
+        id,
+        payload
+      }
+    })
+    .promise()
+
   return id
 }
 
@@ -104,12 +98,10 @@ async function streamById ({
   id,
   reverse,
   limit = 1000,
-  exclusiveStartKey,
+  cursor,
   selection
 }) {
-  const projectionMap = getProjectionMap(selection, {
-    sequence: 'streamSequence'
-  })
+  const projectionMap = getProjectionMap(selection)
 
   const {
     Items: items = [],
@@ -117,21 +109,26 @@ async function streamById ({
   } = await dynamodb.doc
     .query({
       TableName: 'logs',
-      IndexName: 'stream',
+      IndexName: 'streamById',
       KeyConditionExpression: '#stream = :stream',
-      ExpressionAttributeNames: { '#stream': 'stream', ...projectionMap },
-      ExpressionAttributeValues: { ':stream': `stream#${log}#${id}` },
+      ExpressionAttributeNames: {
+        '#stream': ':stream',
+        ...projectionMap
+      },
+      ExpressionAttributeValues: {
+        ':stream': `stream#${id}`
+      },
       ProjectionExpression: projectionMap
         ? Object.keys(projectionMap).join(', ')
         : undefined,
-      ExclusiveStartKey: exclusiveStartKey,
+      ExclusiveStartKey: parseCursor(cursor),
       ScanIndexForward: !reverse,
       Limit: limit
     })
     .promise()
 
   const streams = []
-  for (const { type, streamSequence: sequence, createdAt, payload } of items) {
+  for (const { type, sequence, createdAt, payload } of items) {
     streams.push({
       type,
       sequence,
@@ -142,20 +139,15 @@ async function streamById ({
 
   return {
     streams,
-    lastEvaluatedKey
+    cursor: stringifyCursor(
+      lastEvaluatedKey ||
+        lastEvaluatedItemKey(streams, ['pk', 'sk', 'stream', 'sequence'])
+    )
   }
 }
 
-async function logStream ({
-  log,
-  reverse,
-  limit = 1000,
-  exclusiveStartKey,
-  selection
-}) {
-  const projectionMap = getProjectionMap(selection, {
-    sequence: 'logSequence'
-  })
+async function logStream ({ log, reverse, limit = 1000, cursor, selection }) {
+  const projectionMap = getProjectionMap(selection)
 
   const {
     Items: items = [],
@@ -163,21 +155,21 @@ async function logStream ({
   } = await dynamodb.doc
     .query({
       TableName: 'logs',
-      IndexName: 'log',
+      IndexName: 'logStream',
       KeyConditionExpression: '#pk = :pk',
       ExpressionAttributeNames: { '#pk': 'pk', ...projectionMap },
-      ExpressionAttributeValues: { ':pk': `${log}#stream` },
+      ExpressionAttributeValues: { ':pk': `event#${log}#stream` },
       ProjectionExpression: projectionMap
         ? Object.keys(projectionMap).join(', ')
         : undefined,
       ScanIndexForward: !reverse,
-      ExclusiveStartKey: exclusiveStartKey,
+      ExclusiveStartKey: parseCursor(cursor),
       Limit: limit
     })
     .promise()
 
   const streams = []
-  for (const { type, id, logSequence: sequence, createdAt, payload } of items) {
+  for (const { type, id, sequence, createdAt, payload } of items) {
     streams.push({
       type,
       sequence,
@@ -189,16 +181,51 @@ async function logStream ({
 
   return {
     streams,
-    lastEvaluatedKey
+    cursor: stringifyCursor(
+      lastEvaluatedKey ||
+        lastEvaluatedItemKey(streams, ['pk', 'sk', 'sequence'])
+    )
   }
 }
 
-function getProjectionMap (selection, map) {
+function parseCursor (cursor) {
+  if (cursor) {
+    return JSON.parse(Buffer.from(cursor, 'base64'))
+  }
+}
+
+function lastEvaluatedItemKey (items, keys) {
+  if (items.length) {
+    const last = items.slice(-1)[0]
+    return keys.reduce((sum, key) => {
+      sum[key] = last[key]
+      return sum
+    }, {})
+  }
+}
+
+function stringifyCursor (cursor) {
+  if (cursor) {
+    return Buffer.from(JSON.stringify(cursor)).toString('base64')
+  }
+}
+
+function getProjectionMap (selection, map = {}) {
   if (!selection) return
-  return selection.reduce((sum, name) => {
-    const value = map[name] || name
-    const key = `#${value}`
-    sum[key] = value
-    return sum
-  }, {})
+  return selection.reduce(
+    (sum, name) => {
+      const value = map[name] || name
+      const key = `#${value}`
+      sum[key] = value
+      return sum
+    },
+    {
+      '#pk': 'pk',
+      '#sk': 'sk'
+    }
+  )
+}
+
+function randomBetween (a, b) {
+  return Math.floor(Math.random() * (b - a + 1) + a)
 }
