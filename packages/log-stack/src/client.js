@@ -82,22 +82,30 @@ async function append ({ log, type, id, payload = {} }) {
     })
     .promise()
 
-  await dynamodb.doc
-    .put({
-      TableName: 'logs',
-      Item: {
-        pk: `event#${log}#stream`,
-        sk: `stream#${id}#${sequence}`,
-        stream: `stream#${id}`,
-        sequence,
-        type,
-        createdAt,
-        id,
-        payload
-      }
-    })
-    .promise()
-
+  try {
+    await dynamodb.doc
+      .put({
+        TableName: 'logs',
+        Item: {
+          pk: `event#${log}#stream`,
+          sk: `stream#${id}#${sequence}`,
+          stream: `stream#${id}`,
+          sequence,
+          type,
+          createdAt,
+          id,
+          payload
+        },
+        ConditionExpression: 'attribute_not_exists(sk)'
+      })
+      .promise()
+  } catch (err) {
+    if (err.code === 'ConditionalCheckFailedException') {
+      throw new ApplicationError('key already exists')
+    } else {
+      throw err
+    }
+  }
   return id
 }
 
