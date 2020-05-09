@@ -16,21 +16,24 @@ async function append (root, args, ast) {
 async function logList (root, args, context, ast) {
   return client.logList({
     ...args,
-    selection: getSelection(getField(ast, 'logs'))
+    selection: getSelection(getField(ast, 'logs')),
+    returnCursor: !!getField(ast, 'cursor')
   })
 }
 
 async function streamById (root, args, context, ast) {
   return client.streamById({
     ...args,
-    selection: getSelection(getField(ast, 'streams'))
+    selection: getSelection(getField(ast, 'streams')),
+    returnCursor: !!getField(ast, 'cursor')
   })
 }
 
 async function logStream (root, args, context, ast) {
   return client.logStream({
     ...args,
-    selection: getSelection(getField(ast, 'streams'))
+    selection: getSelection(getField(ast, 'streams')),
+    returnCursor: !!getField(ast, 'cursor')
   })
 }
 

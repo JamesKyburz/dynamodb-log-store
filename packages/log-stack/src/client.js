@@ -5,50 +5,58 @@ const ulid = require('./ulid')
 
 module.exports = { logList, streamById, logStream, append }
 
-async function logList ({ limit = 1000, cursor, selection }) {
-  const projectionMap = getProjectionMap(selection, { name: 'logName' })
+async function logList ({ limit = 1000, cursor, returnCursor, selection }) {
+  const projectionMap = getProjectionMap({
+    selection,
+    map: { name: 'logName' },
+    add: {
+      '#logName': 'logName'
+    }
+  })
 
-  const {
-    Items: items = [],
-    LastEvaluatedKey: lastEvaluatedKey
-  } = await dynamodb.doc
+  const { Items: items = [] } = await dynamodb.doc
     .query({
       TableName: 'logs',
       IndexName: 'log',
       KeyConditionExpression: '#pk = :pk',
-      ExpressionAttributeNames: { ...projectionMap },
+      ExpressionAttributeNames: projectionMap,
       ExpressionAttributeValues: { ':pk': 'logname' },
-      ProjectionExpression: projectionMap
-        ? Object.keys(projectionMap).join(', ')
-        : undefined,
+      ProjectionExpression: projectionExpression(projectionMap),
       ExclusiveStartKey: parseCursor(cursor),
-      Limit: limit
+      Limit: limit * 25
     })
     .promise()
 
   const result = {}
 
-  for (const { logName: name, sequence } of items) {
+  for (const { logName: name, sequence, pk, sk } of items) {
     if (result[name]) {
-      if (sequence > result[name]) {
-        result[name] = sequence
+      if (sequence > result[name].sequence) {
+        result[name] = { pk, sk, sequence }
       }
     } else {
-      result[name] = sequence
+      result[name] = { pk, sk, sequence }
     }
   }
 
   const logs = []
 
-  for (const [name, sequence] of Object.entries(result)) {
-    logs.push({ name, sequence })
+  for (const [key, value] of Object.entries(result)) {
+    logs.push({ name: key, logName: key, ...value })
+    if (logs.length === limit) break
+  }
+
+  const lastEvaluatedItem =
+    returnCursor && getLastEvaluatedItem(logs, ['logName'])
+
+  if (lastEvaluatedItem) {
+    // To prevent the same logName being returned because of the random sk suffix.
+    lastEvaluatedItem.logName += '\x00'
   }
 
   return {
     logs,
-    cursor: stringifyCursor(
-      lastEvaluatedKey || lastEvaluatedItemKey(logs, ['pk', 'sk', 'logName'])
-    )
+    cursor: stringifyCursor(lastEvaluatedItem)
   }
 }
 
@@ -99,14 +107,18 @@ async function streamById ({
   reverse,
   limit = 1000,
   cursor,
+  returnCursor,
   selection
 }) {
-  const projectionMap = getProjectionMap(selection)
+  const projectionMap = getProjectionMap({
+    selection,
+    add: {
+      '#stream': 'stream',
+      '#sequence': 'sequence'
+    }
+  })
 
-  const {
-    Items: items = [],
-    LastEvaluatedKey: lastEvaluatedKey
-  } = await dynamodb.doc
+  const { Items: items = [] } = await dynamodb.doc
     .query({
       TableName: 'logs',
       IndexName: 'streamById',
@@ -118,9 +130,7 @@ async function streamById ({
       ExpressionAttributeValues: {
         ':stream': `stream#${id}`
       },
-      ProjectionExpression: projectionMap
-        ? Object.keys(projectionMap).join(', ')
-        : undefined,
+      ProjectionExpression: projectionExpression(projectionMap),
       ExclusiveStartKey: parseCursor(cursor),
       ScanIndexForward: !reverse,
       Limit: limit
@@ -128,40 +138,50 @@ async function streamById ({
     .promise()
 
   const streams = []
-  for (const { type, sequence, createdAt, payload } of items) {
+  for (const { pk, sk, stream, type, sequence, createdAt, payload } of items) {
     streams.push({
       type,
+      pk,
+      sk,
+      stream,
       sequence,
       createdAt,
       ...(payload && { payload: JSON.stringify(payload) })
     })
   }
 
+  const lastEvaluatedItem =
+    returnCursor && getLastEvaluatedItem(streams, ['stream', 'sequence'])
+
   return {
     streams,
-    cursor: stringifyCursor(
-      lastEvaluatedKey ||
-        lastEvaluatedItemKey(streams, ['pk', 'sk', 'stream', 'sequence'])
-    )
+    cursor: stringifyCursor(lastEvaluatedItem)
   }
 }
 
-async function logStream ({ log, reverse, limit = 1000, cursor, selection }) {
-  const projectionMap = getProjectionMap(selection)
+async function logStream ({
+  log,
+  reverse,
+  limit = 1000,
+  cursor,
+  returnCursor,
+  selection
+}) {
+  const projectionMap = getProjectionMap({
+    selection,
+    add: {
+      '#sequence': 'sequence'
+    }
+  })
 
-  const {
-    Items: items = [],
-    LastEvaluatedKey: lastEvaluatedKey
-  } = await dynamodb.doc
+  const { Items: items = [] } = await dynamodb.doc
     .query({
       TableName: 'logs',
       IndexName: 'logStream',
       KeyConditionExpression: '#pk = :pk',
       ExpressionAttributeNames: { '#pk': 'pk', ...projectionMap },
       ExpressionAttributeValues: { ':pk': `event#${log}#stream` },
-      ProjectionExpression: projectionMap
-        ? Object.keys(projectionMap).join(', ')
-        : undefined,
+      ProjectionExpression: projectionExpression(projectionMap),
       ScanIndexForward: !reverse,
       ExclusiveStartKey: parseCursor(cursor),
       Limit: limit
@@ -169,8 +189,10 @@ async function logStream ({ log, reverse, limit = 1000, cursor, selection }) {
     .promise()
 
   const streams = []
-  for (const { type, id, sequence, createdAt, payload } of items) {
+  for (const { pk, sk, type, id, sequence, createdAt, payload } of items) {
     streams.push({
+      pk,
+      sk,
       type,
       sequence,
       createdAt,
@@ -179,12 +201,12 @@ async function logStream ({ log, reverse, limit = 1000, cursor, selection }) {
     })
   }
 
+  const lastEvaluatedItem =
+    returnCursor && getLastEvaluatedItem(streams, ['sequence'])
+
   return {
     streams,
-    cursor: stringifyCursor(
-      lastEvaluatedKey ||
-        lastEvaluatedItemKey(streams, ['pk', 'sk', 'sequence'])
-    )
+    cursor: stringifyCursor(lastEvaluatedItem)
   }
 }
 
@@ -194,23 +216,29 @@ function parseCursor (cursor) {
   }
 }
 
-function lastEvaluatedItemKey (items, keys) {
-  if (items.length) {
-    const last = items.slice(-1)[0]
-    return keys.reduce((sum, key) => {
-      sum[key] = last[key]
-      return sum
-    }, {})
-  }
-}
-
 function stringifyCursor (cursor) {
   if (cursor) {
     return Buffer.from(JSON.stringify(cursor)).toString('base64')
   }
 }
 
-function getProjectionMap (selection, map = {}) {
+function projectionExpression (projectionMap) {
+  if (projectionMap) {
+    return Object.keys(projectionMap).join(', ')
+  }
+}
+
+function getLastEvaluatedItem (items, keys) {
+  if (items.length) {
+    const lastItem = items[items.length - 1]
+    return ['pk', 'sk'].concat(keys).reduce((sum, key) => {
+      sum[key] = lastItem[key]
+      return sum
+    }, {})
+  }
+}
+
+function getProjectionMap ({ selection, map = {}, add }) {
   if (!selection) return
   return selection.reduce(
     (sum, name) => {
@@ -221,7 +249,8 @@ function getProjectionMap (selection, map = {}) {
     },
     {
       '#pk': 'pk',
-      '#sk': 'sk'
+      '#sk': 'sk',
+      ...add
     }
   )
 }
